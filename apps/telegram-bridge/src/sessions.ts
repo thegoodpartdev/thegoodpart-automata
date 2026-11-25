@@ -1,5 +1,5 @@
 import QRCode from 'qrcode'
-import { Api, Logger, TelegramClient, sessions } from 'teleproto'
+import { Api, Logger, TelegramClient, client as teleproto, sessions } from 'teleproto'
 import type { BridgeConfig } from './config.ts'
 import { digestsEqual, hashKey, mintKey, seal, sessionContext, unseal, webhookContext } from './crypto.ts'
 import type { Sql } from './db.ts'
@@ -618,6 +618,37 @@ export class SessionManager {
    * out exactly as written, not reinterpreted as Markdown.
    */
   async send(id: string, chatId: string, text: string): Promise<{ chatId: string, messageId: number, date: string }> {
+    return this.sendTo(id, chatId, (client, peer) => client.sendMessage(peer, { message: text, parseMode: false }))
+  }
+
+  /**
+   * One photo with an optional caption. The bytes were checked by the app
+   * (JPEG or PNG, size-capped); the file name's extension is what makes
+   * teleproto upload it as a photo rather than a document (`utils.isImage`).
+   * The caption is never parsed for formatting, like a text send.
+   */
+  async sendPhoto(
+    id: string,
+    chatId: string,
+    image: Buffer,
+    mimeType: 'image/jpeg' | 'image/png',
+    caption: string,
+  ): Promise<{ chatId: string, messageId: number, date: string }> {
+    const name = mimeType === 'image/png' ? 'image.png' : 'image.jpg'
+    return this.sendTo(id, chatId, (client, peer) => client.sendFile(peer, {
+      file: new teleproto.uploads.CustomFile(name, image.length, '', image),
+      caption,
+      parseMode: false,
+      forceDocument: false,
+    }))
+  }
+
+  /** Resolve a known chat to a peer, run one send, store the sent message. */
+  private async sendTo(
+    id: string,
+    chatId: string,
+    sendWith: (client: TelegramClient, peer: Api.TypeInputPeer) => Promise<Api.Message>,
+  ): Promise<{ chatId: string, messageId: number, date: string }> {
     await this.row(id)
     const rt = this.runtime(id)
     const client = this.connectedClient(rt)
@@ -635,7 +666,7 @@ export class SessionManager {
 
     let message: Api.Message
     try {
-      message = await client.sendMessage(peer, { message: text, parseMode: false })
+      message = await sendWith(client, peer)
     }
     catch (error) {
       throw toHttpError(error)

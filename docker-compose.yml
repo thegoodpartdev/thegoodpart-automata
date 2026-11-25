@@ -112,7 +112,7 @@ services:
       retries: 10
 
   evolution:
-    image: ghcr.io/operational-intelligence-inc/evolution-api-reforged:3.2.0@sha256:ff7e1c89392c9e0ab21c503216ab9948b553c2778d6bc52f925e1c0dc2da796f
+    image: ghcr.io/operational-intelligence-inc/evolution-api-reforged:3.3.1@sha256:885b05339de10f7b9880101d1a48e12a77eaadf947235cf8f6fcdd1d843508c6
     profiles: [whatsapp]
     restart: unless-stopped
     depends_on:

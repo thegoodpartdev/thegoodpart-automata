@@ -1,4 +1,4 @@
-import type { AppInstance } from './app-db'
+import type { AppInstance, SocketEvidenceKind } from './app-db'
 import { rememberBounded } from './lookup-cache'
 
 /**
@@ -70,7 +70,11 @@ const MAX_LAST_WRITTEN = 10_000
 
 /**
  * Record that a call needing the socket found it dead. Fire and forget.
- * `what` is for the log only — "send", "group lookup".
+ * `kind` is stored beside the time (`socket_dead_by`) so the operator mail can
+ * say what was seen — a `Connection Closed`, or sends nobody acknowledged
+ * (#305: an account whose receipts were only late was mailed as failing with
+ * `Connection Closed`, and the investigation went the wrong way). It never
+ * decides `stalled`. `what` is for the log only — "send", "group lookup".
  *
  * `at` is when the failing call was made, for evidence found after the fact —
  * a send whose ack never came (send-ack.ts). It is what `socketStalled` judges
@@ -80,7 +84,7 @@ const MAX_LAST_WRITTEN = 10_000
  * per send, two minutes late, and dropping it would leave an older time a
  * reopen has already spent.
  */
-export function noteSocketDead(instance: Pick<AppInstance, 'id'>, what: string, at?: Date): void {
+export function noteSocketDead(instance: Pick<AppInstance, 'id'>, kind: SocketEvidenceKind, what: string, at?: Date): void {
   const now = Date.now()
   if (!at) {
     const last = lastWritten.get(instance.id)
@@ -88,18 +92,19 @@ export function noteSocketDead(instance: Pick<AppInstance, 'id'>, what: string, 
   }
   rememberBounded(lastWritten, instance.id, now, MAX_LAST_WRITTEN)
 
-  storeSocketDead(instance.id, what, at).catch((error) => {
+  storeSocketDead(instance.id, kind, what, at).catch((error) => {
     lastWritten.delete(instance.id)
     console.error(`[socket] could not record the dead socket seen on connection ${instance.id}:`, error)
   })
 }
 
-async function storeSocketDead(instanceId: string, what: string, at: Date | undefined): Promise<void> {
+async function storeSocketDead(instanceId: string, kind: SocketEvidenceKind, what: string, at: Date | undefined): Promise<void> {
   const sql = await appDb()
   const written = at
     ? await sql`
         UPDATE app.instances
-        SET socket_dead_seen_at = date_trunc('milliseconds', ${at.toISOString()}::timestamptz)
+        SET socket_dead_seen_at = date_trunc('milliseconds', ${at.toISOString()}::timestamptz),
+            socket_dead_by = ${kind}
         WHERE id = ${instanceId}
           AND (socket_dead_seen_at IS NULL
             OR socket_dead_seen_at < date_trunc('milliseconds', ${at.toISOString()}::timestamptz))
@@ -107,7 +112,7 @@ async function storeSocketDead(instanceId: string, what: string, at: Date | unde
       `
     : await sql`
         UPDATE app.instances
-        SET socket_dead_seen_at = date_trunc('milliseconds', now())
+        SET socket_dead_seen_at = date_trunc('milliseconds', now()), socket_dead_by = ${kind}
         WHERE id = ${instanceId}
           AND (socket_dead_seen_at IS NULL OR socket_dead_seen_at < now() - interval '1 minute')
         RETURNING id
@@ -149,12 +154,12 @@ async function clearSocketDead(instanceId: string, before?: Date): Promise<void>
   const sql = await appDb()
   const cleared = before
     ? await sql`
-        UPDATE app.instances SET socket_dead_seen_at = NULL
+        UPDATE app.instances SET socket_dead_seen_at = NULL, socket_dead_by = NULL
         WHERE id = ${instanceId} AND socket_dead_seen_at <= ${before.toISOString()}::timestamptz
         RETURNING id
       `
     : await sql`
-        UPDATE app.instances SET socket_dead_seen_at = NULL
+        UPDATE app.instances SET socket_dead_seen_at = NULL, socket_dead_by = NULL
         WHERE id = ${instanceId} AND socket_dead_seen_at IS NOT NULL
         RETURNING id
       `
@@ -174,7 +179,7 @@ export function forgetSocketEvidence(instanceId: string, seenAt: string): void {
   lastWritten.delete(instanceId)
   appDb()
     .then(sql => sql`
-      UPDATE app.instances SET socket_dead_seen_at = NULL
+      UPDATE app.instances SET socket_dead_seen_at = NULL, socket_dead_by = NULL
       WHERE id = ${instanceId} AND socket_dead_seen_at <= ${seenAt}::timestamptz
     `)
     .catch((error) => {

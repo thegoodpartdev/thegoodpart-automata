@@ -1,4 +1,5 @@
 import type { AppInstance } from './app-db'
+import { RECEIPT_RANK } from './evolution-db'
 import type { SentMessageRef } from './evolution-db'
 import { rememberBounded } from './lookup-cache'
 
@@ -69,13 +70,11 @@ import { rememberBounded } from './lookup-cache'
  */
 
 /** How long after a send its ack is looked for. WhatsApp's server ack normally takes well under a second. */
-export const ACK_CHECK_DELAY_MS = 2 * 60_000
+const ACK_CHECK_DELAY_MS = 2 * 60_000
 
 /** Misses in a row, with no ack between, that record the socket dead. */
 const MISSES_TO_RECORD = 2
 
-/** Statuses that prove WhatsApp received the message — `status[update.status]` in Evolution. */
-const ACKED = new Set(['SERVER_ACK', 'DELIVERY_ACK', 'READ', 'PLAYED'])
 
 /** Checks waiting on their timer, all connections together. Past it, new sends go unchecked. */
 const MAX_PENDING_CHECKS = 2_000
@@ -96,7 +95,7 @@ const MAX_MISS_RUNS = 10_000
  * What `/message/sendText` answered, as the reference the check needs — or
  * `undefined` when the answer lacks it (nothing to look up, so no check).
  */
-export function sentMessageRef(result: Record<string, unknown>): SentMessageRef | undefined {
+function sentMessageRef(result: Record<string, unknown>): SentMessageRef | undefined {
   const key = result.key as { id?: unknown, remoteJid?: unknown } | undefined
   const id = typeof key?.id === 'string' && key.id ? key.id : undefined
   const remoteJid = typeof key?.remoteJid === 'string' && key.remoteJid ? key.remoteJid : undefined
@@ -160,7 +159,7 @@ async function checkSendAck(instance: AppInstance, sent: SentMessageRef, sentAt:
     console.info(`[socket] connection ${instance.id}: a send is still PENDING ${ACK_CHECK_DELAY_MS / 1000} s on (${misses} in a row)`)
     return
   }
-  noteSocketDead(instance, `send left unacknowledged (${misses} in a row)`, sentAt)
+  noteSocketDead(instance, 'unacked_sends', `send left unacknowledged (${misses} in a row)`, sentAt)
 }
 
 /**
@@ -188,7 +187,7 @@ async function lastTrafficAt(instance: AppInstance): Promise<number | undefined>
  *     the run starts again at this miss.
  *   - `none` — nothing newer, or not known: the miss counts as it stands.
  */
-export function judgeMiss(
+function judgeMiss(
   trafficAt: number | undefined,
   sentAt: number,
   previousSentAt: number | undefined,
@@ -204,13 +203,16 @@ export function judgeMiss(
  * addressed by phone number or LID. A group send often never gets one
  * (`isDirectChat` false), so only its ack counts.
  */
-export function isDirectChat(remoteJid: string): boolean {
+function isDirectChat(remoteJid: string): boolean {
   return remoteJid.endsWith('@s.whatsapp.net') || remoteJid.endsWith('@lid')
 }
 
 /** What one stored status says about the socket. Pure. */
-export function judgeAck(status: string | undefined, remoteJid: string): 'acked' | 'missed' | 'unknown' {
-  if (status && ACKED.has(status)) return 'acked'
+function judgeAck(status: string | undefined, remoteJid: string): 'acked' | 'missed' | 'unknown' {
+  // Any receipt proves WhatsApp received the message. Read at call time, never
+  // copied into a module-level const: utils share one bundle chunk, and a
+  // top-level read of another file's export can run before it is initialised.
+  if (status && (RECEIPT_RANK as readonly string[]).includes(status)) return 'acked'
   if (status === 'PENDING') return isDirectChat(remoteJid) ? 'missed' : 'unknown'
   return 'unknown'
 }

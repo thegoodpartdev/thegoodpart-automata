@@ -31,8 +31,8 @@ import type { Sql } from './db.ts'
  */
 
 const JOB = 'revenue_daily'
-/** The reconcile pass's row in `cloud.job_runs`, written by main.ts. */
-export const RECONCILE_JOB = 'stripe_reconcile'
+/** The reconcile pass's row in `cloud.job_runs`, written by `markReconciled`. */
+const RECONCILE_JOB = 'stripe_reconcile'
 const TIME_ZONE = 'America/New_York'
 const LEASE_MS = 10 * 60_000
 

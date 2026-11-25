@@ -54,7 +54,7 @@ RUN pnpm install --frozen-lockfile --prod --filter telegram-bridge...
 FROM node:22.23.2-alpine AS node22
 FROM redis:8.2.9-alpine AS redis
 
-FROM ghcr.io/operational-intelligence-inc/evolution-api-reforged:3.2.0@sha256:ff7e1c89392c9e0ab21c503216ab9948b553c2778d6bc52f925e1c0dc2da796f AS runtime
+FROM ghcr.io/operational-intelligence-inc/evolution-api-reforged:3.3.1@sha256:885b05339de10f7b9880101d1a48e12a77eaadf947235cf8f6fcdd1d843508c6 AS runtime
 
 ARG S6_OVERLAY_VERSION=3.2.3.2
 ARG S6_OVERLAY_NOARCH_SHA256=5379750ed30a84bbd2e2dd74847ba6b5bd29cd0b2e3ea2ec58049b57eb2eda12

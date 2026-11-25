@@ -118,6 +118,12 @@ export default defineNuxtConfig({
     // role behind it must be SELECT-only — see server/utils/evolution-db.ts and
     // docs/whatsapp.md "Reading and searching messages".
     evolutionDatabaseUrl: '',
+    // What decides whether a WhatsApp connection is looping or stuck when its
+    // Evolution server reports its own `health` (the fork from 3.3.0):
+    // `compare` (default) keeps the app's own signals and logs every
+    // disagreement with Evolution's report; `use` lets the report decide. See
+    // server/utils/evolution-health.ts and ju-li/automata-mcp#306.
+    evolutionHealth: 'compare',
 
     // The *default* Telegram bridge (apps/telegram-bridge), for Telegram
     // connections that did not bring their own. Optional, like Evolution's.
@@ -191,6 +197,10 @@ export default defineNuxtConfig({
     // leaves this install only when they submit it there. `off` hides the
     // offer. Ignored on the hosted offering. See server/utils/onboarding.ts.
     selfHostUpdatesUrl: 'https://billing.getautomata.app/self-host/updates',
+    // Hosted offering only: a promotion banner for organizations on Free, as
+    // `Holiday,YYYY-MM-DD,CODE,details` (end date inclusive, US Eastern). Empty
+    // = no banner. See server/utils/promo.ts.
+    promo: '',
     // Superseded by cloudUrl. Still read so a hosted deployment that upgrades
     // without setting the new variables keeps its plans on (fail closed).
     billing: '',

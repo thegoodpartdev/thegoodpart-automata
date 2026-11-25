@@ -172,6 +172,38 @@ function toggle(key: ScopeList, values: string | string[], on: boolean) {
 }
 
 /**
+ * Check all / Uncheck all on one axis. They act on the rows on screen, so a
+ * search narrows them: search "Family", Uncheck all, and only the Family rows
+ * lose their tick — everything else picked stays picked.
+ *
+ * With no search, Uncheck all empties the axis outright, including entries no
+ * row shows (a chat aged out of the listing, a table past the 500 listed), since
+ * the chips above still list those and "all" should mean what it says.
+ */
+interface BulkState { shown: string[], filtered: boolean, canCheck: boolean, canUncheck: boolean }
+
+function bulkState(key: ScopeList, shown: string[], query: string): BulkState {
+  const held = new Set(scope.value[key])
+  const filtered = query.trim() !== ''
+  const checked = shown.filter(v => held.has(v)).length
+  return {
+    shown,
+    filtered,
+    canCheck: checked < shown.length,
+    canUncheck: filtered ? checked > 0 : held.size > 0,
+  }
+}
+
+function applyBulk(key: ScopeList, state: BulkState, on: boolean) {
+  if (!on && !state.filtered) scope.value = { ...scope.value, [key]: [] }
+  else toggle(key, state.shown, on)
+}
+
+const toolBulk = computed(() => bulkState('tool_names', (toolData.value?.tools ?? []).map(t => t.name), ''))
+const tableBulk = computed(() => bulkState('table_names', visibleTables.value.map(t => t.qname), tableSearch.value))
+const chatBulk = computed(() => bulkState('chat_jids', visibleChats.value.flatMap(membersOf), search.value))
+
+/**
  * The muted line under a chat's name: a number for a person, a size for a group.
  * Two chats can share a display name, and this is what tells them apart.
  *
@@ -258,7 +290,9 @@ async function addByNumber() {
         name="tools"
         all-label="All actions"
         some-label="Only selected actions"
+        :bulk="toolBulk"
         @update:model-value="scope = { ...scope, all_tools: $event }"
+        @bulk="applyBulk('tool_names', toolBulk, $event)"
       />
 
       <div v-if="!scope.all_tools" class="space-y-2 rounded-md border p-3">
@@ -373,7 +407,9 @@ async function addByNumber() {
         name="tables"
         all-label="All tables the connection can read"
         some-label="Only selected tables"
+        :bulk="tableBulk"
         @update:model-value="scope = { ...scope, all_tables: $event }"
+        @bulk="applyBulk('table_names', tableBulk, $event)"
       />
 
       <div v-if="!scope.all_tables" class="flex min-h-0 min-w-0 flex-1 flex-col gap-3 rounded-md border p-3">
@@ -449,7 +485,9 @@ async function addByNumber() {
         name="chats"
         :all-label="chatAxis.all"
         :some-label="chatAxis.some"
+        :bulk="chatBulk"
         @update:model-value="scope = { ...scope, all_chats: $event }"
+        @bulk="applyBulk('chat_jids', chatBulk, $event)"
       />
 
       <div v-if="!scope.all_chats" class="flex min-h-0 min-w-0 flex-1 flex-col gap-3 rounded-md border p-3">

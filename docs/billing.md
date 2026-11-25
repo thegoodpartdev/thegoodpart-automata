@@ -163,8 +163,8 @@ UPDATE app.organizations SET max_connections = NULL, max_tokens = NULL, max_memb
 
 ## Account events
 
-On the hosted deployment the web app also records account and organization changes in `app.hosted_events`. The cloud service reads them. Billing acts on membership changes (to bill seats) and on deleted organizations (to cancel what they were paying for). The CRM sync acts on signups, email and membership changes, and plan changes. Product analytics (PostHog) will read the same rows later; tool-call telemetry and its reasons are never among them. The changes recorded:
-- signups and email changes;
+On the hosted deployment the web app also records account and organization changes in `app.hosted_events`. The cloud service reads them. Billing acts on membership changes (to bill seats) and on deleted organizations (to cancel what they were paying for). The CRM sync acts on signups, email and membership changes, plan changes, and deleted accounts. Product analytics (PostHog) will read the same rows later; tool-call telemetry and its reasons are never among them. The changes recorded:
+- signups, email changes and account deletions;
 - organizations created and deleted;
 - members joining, leaving and changing role;
 - connections and tokens created and removed;
@@ -179,7 +179,7 @@ Events never contain credentials, connection strings, chat or table names, messa
 
 The cloud service keeps revenue numbers in Postgres, so they can be queried and joined with `app` without asking Stripe. Two tables in the `cloud` schema:
 
-**`cloud.stripe_subscriptions`**: one row per Stripe subscription, keyed on its Stripe id. Every time the service re-reads a customer's subscriptions (on each webhook and in the hourly reconcile) it upserts what it read, in the same transaction that writes the plan columns. That costs no extra Stripe calls, except one per discounted subscription whose coupon Stripe did not expand. The table is therefore never more than about an hour behind Stripe, even if a webhook is lost. The reconcile also runs a minute after each boot. Rows are never deleted: canceled subscriptions are what trial conversion and churn are counted from.
+**`cloud.stripe_subscriptions`**: one row per Stripe subscription, keyed on its Stripe id. Every time the service re-reads a customer's subscriptions (on each webhook and in the hourly reconcile) it upserts what it read, in the same transaction that writes the plan columns. That costs no extra Stripe calls, except one per coupon Stripe did not expand. The table is therefore never more than about an hour behind Stripe, even if a webhook is lost. The reconcile also runs a minute after each boot. Rows are never deleted: canceled subscriptions are what trial conversion and churn are counted from.
 
 | Column | Meaning |
 | --- | --- |
@@ -402,6 +402,21 @@ people type, the coupon on its own has none. A code applied at Checkout stays on
 the subscription, so a 100%-off-forever code keeps invoices at $0 while the
 organization reads as Pro.
 
+To advertise a code, set `NUXT_PROMO` on the **web** service:
+
+```
+NUXT_PROMO=Thanksgiving,2026-12-01,THANKSGIVING2026,50% off Pro for 6 months
+```
+
+Holiday, last day (inclusive, US Eastern), code, details — the details may
+contain commas. Organizations on Free get a banner at the top of every page
+(not on the first-run setup) reading "Thanksgiving offer: 50% off Pro for 6
+months with code THANKSGIVING2026", with an Upgrade link for admins. It
+disappears after the end date by itself; clear the variable to stop it sooner.
+The banner only advertises the code: create the code in Stripe first, and give
+it its own expiry there if it should stop working too. A malformed value shows
+no banner and logs `[promo]` at the first page load.
+
 ### 6. Deploy the cloud service
 
 On Railway, add a service from this repository:
@@ -425,17 +440,17 @@ STRIPE_PRICE_SEAT=price_…
 
 This is what lets a Railway PR environment start. Railway never copies sealed variables into a PR environment, so the two secrets go missing while the price ids arrive. The preview then runs without billing. To test Checkout in previews, give the PR environment's base environment unsealed **test-mode** values. Never use live keys there.
 
-`GET /health` answers `{ ok, app, billing, crm }`. `app` is `waiting` until the web app has run its migrations; the cloud service waits for them rather than failing. `billing` is `configured` when `STRIPE_SECRET_KEY` is set, else `unconfigured`. The service listens on `CLOUD_PORT`, else `PORT`, else 8096, and refuses to start with a `CLOUD_ADMIN_KEY` shorter than 24 characters.
+`GET /health` answers `{ ok, app, billing, crm, selfHostUpdates }`. `app` is `waiting` until the web app has run its migrations; the cloud service waits for them rather than failing. `billing` is `configured` when `STRIPE_SECRET_KEY` is set, else `unconfigured`. The service listens on `CLOUD_PORT`, else `PORT`, else 8096, and refuses to start with a `CLOUD_ADMIN_KEY` shorter than 24 characters.
 
 **Database access.** The service connects to the web app's database. It reads `app` tables, writes only organizations' billing and limit columns, `app.hosted_events` and `app.entitlement_defaults`, and keeps its own state in a `cloud` schema it creates. The simplest setup reuses the web app's database URL. To narrow it, give it a role with:
 - `USAGE` on the `app` schema;
 - `SELECT` on `app.organizations`, `app.memberships`, `app.hosted_events`, `app.migrations` and `app.entitlement_defaults` (its `INSERT … ON CONFLICT DO UPDATE` reads the row it replaces);
-- with the CRM sync on, `SELECT (id, email, name, created, marketing_consent_at)` on `app.users`;
+- with the CRM sync on, `SELECT (id, email, name, created, marketing_consent_at)` on `app.users`, and for the activity dates `SELECT (instance, assigned_to, last_used_at)` on `app.mcp_tokens` and `SELECT (id, org)` on `app.instances`;
 - `UPDATE` on `app.organizations`;
 - `INSERT` on `app.hosted_events` and `INSERT, UPDATE` on `app.entitlement_defaults`;
 - `CREATE` on the database, or an existing `cloud` schema it owns. Everything in `cloud`, including `cloud.stripe_subscriptions` and `cloud.revenue_daily`, is created by the service and owned by its role, so they need no further grant. A separate analytics role that should read them needs `USAGE` on `cloud` and `SELECT` on the two tables.
 
-It never needs `app.instances`, where connection credentials live.
+It never needs the credential columns of `app.instances`.
 
 ### 7. Point the web app at it
 

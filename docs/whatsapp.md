@@ -2,7 +2,7 @@
 
 ## Which Evolution
 
-The deployment's own Evolution server runs **`evolution-api-reforged` 3.2.0**,
+The deployment's own Evolution server runs **`evolution-api-reforged` 3.3.1**,
 our fork of Evolution API
 ([repo](https://github.com/Operational-Intelligence-Inc/evolution-api-reforged),
 formerly `ju-li/evolution-api-v2`). Every file that names it pins its digest:
@@ -68,6 +68,52 @@ What the fork changes, and why we run it:
     **Import full history** on the dashboard, then a QR scan.
   - **Each history batch is logged at INFO:** `history batch: …` when it arrives
     and `history batch stored: …` once it is written.
+- **Sent messages keep their receipts** (3.3.0,
+  [#67](https://github.com/Operational-Intelligence-Inc/evolution-api-reforged/issues/67)).
+  - **What went wrong:** WhatsApp's acknowledgement of a message sent through
+    the API could arrive before Evolution had stored the message. It was then
+    thrown away, and the message read `PENDING` until a later receipt arrived,
+    which can be minutes or a day. The stored status of a sent message was also
+    never updated.
+  - **What changed:** an early acknowledgement is kept and applied once the
+    message is stored, and a sent message's status now follows its receipts
+    (`SERVER_ACK`, `DELIVERY_ACK`, `READ`), never backwards.
+  - **Why it matters here:** the app reads that status two minutes after each
+    send to tell a working connection from a stuck one. Before 3.3.0 a healthy
+    account could be reported as [stuck](#stuck-with-the-socket-dead).
+- **Evolution reports each connection's health** (3.3.0,
+  [#68](https://github.com/Operational-Intelligence-Inc/evolution-api-reforged/issues/68)).
+  `GET /instance/connectionState` answers a `health` object: when the socket
+  last heard from WhatsApp, reconnects and conflicts in the last ten minutes,
+  the last message received, sends not yet acknowledged, and a verdict (`ok`,
+  `reconnecting`, `looping`, `stalled` or `closed`) with its reasons. It is
+  kept in memory and starts empty when Evolution starts. The app reads it and,
+  by default, only compares it with its own signals; see
+  [Evolution's own health report](#evolutions-own-health-report).
+- **A socket that stops working can be rebuilt on its own** (3.3.0,
+  [#69](https://github.com/Operational-Intelligence-Inc/evolution-api-reforged/issues/69)).
+  - **When:** a connection reads `open` but its websocket is closed, or nothing
+    has arrived from WhatsApp for a minute.
+  - **What it does:** opens a new socket for that one connection on its stored
+    session. No QR scan, and no other connection is touched. It backs off
+    between tries and stops after five that did not help.
+  - **It only logs by default** (`WATCHDOG_MODE=report`): each rebuild it would
+    do is one `Watchdog (report mode)` line, and nothing changes. To let it act,
+    add `WATCHDOG_MODE: on` to the `evolution` service's environment. Read a
+    week of those log lines first.
+- **Large history batches survive a restart** (3.3.0,
+  [#74](https://github.com/Operational-Intelligence-Inc/evolution-api-reforged/issues/74)).
+  A history batch over `EVENT_QUEUE_MAX_ENTRY_BYTES` (8 MiB) used to be
+  processed without being written to Redis, so a restart during an import lost
+  it, and WhatsApp does not send history twice. Such a batch is now split into
+  parts under the limit, each stored and processed on its own; its
+  `history batch:` log line shows `part=from-to/total`.
+- **A linked session no longer mutes the phone's notifications** (3.3.1,
+  [#82](https://github.com/Operational-Intelligence-Inc/evolution-api-reforged/issues/82)).
+  Baileys sent a presence with no `type` (= `available`) on every credentials
+  update, so the session read as online even with `alwaysOnline: false`, and
+  WhatsApp held back push notifications on the phone until the number was
+  unlinked. Those updates no longer send a presence.
 
 ### Moving from stock Evolution 2.3.7
 
@@ -290,8 +336,9 @@ NUXT_EVOLUTION_DATABASE_URL=postgres://wamcp_search:change-me@localhost:5432/evo
 
 ### Indexes on Evolution's tables
 
-Evolution ships `@@index([instanceId])` and nothing else — no index on
-`messageTimestamp`, none on the `key` JSONB — so reading and searching are both a
+Stock Evolution ships `@@index([instanceId])` and nothing else — no index on
+`messageTimestamp`, none on the `key` JSONB (the fork adds only the unique index
+above, which has no timestamp) — so reading and searching are both a
 sequential scan within one account. History import makes that corpus much larger than it would
 otherwise be: a number with years of conversations arrives all at once at
 pairing, rather than accumulating. The queries carry a 10-second
@@ -773,7 +820,13 @@ Evolution writes on every open — marks it **Stuck** on the dashboard, and
 the operator is mailed straight away; after two hours (longer than the usual
 ten minutes, since a stuck socket is inferred rather than read), everyone who
 can reach the connection is emailed that the service needs
-restarting (see [alerts.md](alerts.md)). The record clears when WhatsApp next
+restarting (see [alerts.md](alerts.md)). The operator mail says which evidence
+it was. A `Connection Closed` is proof, and the fix is the restart. Unacknowledged
+sends are an inference: an Evolution server that drops or delays receipts
+(the fork before 3.3.0, stock 2.3.7) produces the same reading on a healthy
+account. So that mail asks you to check the server version and the sends'
+`"Message"` / `"MessageUpdate"` rows before restarting every account on it.
+The record clears when WhatsApp next
 acknowledges a send (a receipt past `PENDING`) or answers a group lookup
 (even with a refusal), when a message is received after it, when Evolution reopens
 the socket, or when the account is next read as not `open`.
@@ -785,6 +838,43 @@ failed calls alone, for 30 minutes after the last one. `Timed Out` is not
 counted, since a healthy socket can answer it too. A webhook delivery never
 records anything (deliveries are unsigned). And it is found only by a call that
 needs the socket: an account nobody sends from waits for its next group lookup.
+
+## Evolution's own health report
+
+The two sections above describe how the app infers a loop and a stuck socket
+from outside Evolution. From 3.3.0 the fork reports both itself: every
+`connectionState` answer, which the app already reads for the live state,
+carries a `health` object with a verdict (`ok`, `reconnecting`, `looping`,
+`stalled`, `closed`) and its reasons. The app reads it on every status read, at
+no extra cost, and maps it like this:
+
+| The app reports | Evolution's report |
+|---|---|
+| `flapping` (Reconnecting over and over) | verdict `looping`: three drops of an open socket, or two `conflict: replaced`, in ten minutes |
+| `stalled` (Stuck) | verdict `stalled`: the state reads `open`, and the websocket is closed, nothing has arrived for two keep-alive intervals, the event queue is stuck, or a send to a person went unacknowledged with nothing received since |
+| `lastInboundAt` | `inbound.lastMessageAt`: when Evolution received the last message, while it has one (empty after an Evolution restart until something arrives) |
+
+`NUXT_EVOLUTION_HEALTH` says which one decides:
+
+- **`compare` (the default).** The app's own signals decide, as before, and
+  every disagreement with Evolution's report is logged once when it starts,
+  changes and ends, by connection id:
+  `[evolution-health] connection <id>: stalled app=false evolution=true (verdict stalled, reasons keepalive_silent, …); the app's signals decide`.
+  A `sessionLost` line compares the app's dropped-session reading with
+  Evolution retrying a close; the report cannot say whether the phone is still
+  linked (an unscanned QR retries too), so that one is never taken from it.
+- **`use`.** Evolution's report decides `flapping`, `stalled` and
+  `lastInboundAt`; the app's signals are still computed and compared. Grace
+  periods, recipients and mails are unchanged.
+
+To confirm the comparison is running, look for the line each web process
+logs once per Evolution server, at its first status read:
+`[evolution-health] reading the deployment's Evolution's health report (version 2); comparing only, the app's signals decide`.
+A server without a report logs `… reports no health …` instead.
+
+A server without the report (stock 2.3.7, the fork before 3.3.0, a rollback)
+always keeps the app's own signals, whatever the setting. So does a report the
+app cannot read. Evolution not answering at all is `unknown`, as before.
 
 ## Connections never paired are removed after an hour
 
@@ -852,7 +942,7 @@ re-import can write a second copy of a message Evolution already holds (see
 [Reading and searching messages](#reading-and-searching-messages)), but reads and
 searches collapse copies by `key.id`, so each message is still reported once.
 
-Watch it land with `pnpm services:logs` while scanning. The fork (3.2.0) logs
+Watch it land with `pnpm services:logs` while scanning. The fork (since 3.2.0) logs
 each batch at INFO, with its date range and what was stored:
 
 ```
@@ -885,8 +975,10 @@ Caveats worth knowing before you rely on it:
   stops at one year even when the phone holds more.
 - **Groups come too.** `syncFullHistory` overrides Evolution's group filter, so
   group chats appear in `list-chats` and in the token scope picker.
-- **Reads get slower as it grows.** Evolution indexes its `Message` table on
-  `instanceId` only; `remoteJid` lives inside a JSONB column with no index.
+- **Reads get slower as it grows.** Stock Evolution indexes its `Message` table
+  on `instanceId` only; `remoteJid` lives inside a JSONB column with no index
+  (the fork's unique index adds no timestamp). See
+  [Indexes on Evolution's tables](#indexes-on-evolutions-tables).
 
 ### Recent history only
 
