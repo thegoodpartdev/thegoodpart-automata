@@ -15,7 +15,7 @@ const scope = defineModel<TokenScope>({ required: true })
  */
 const disclaimer = defineModel<string | null>('disclaimer', { default: null })
 
-const canSend = computed(() => allowsSending(scope.value, props.kind))
+const canSend = computed(() => allowsSending(scope.value, props.kind, toolData.value?.tools))
 
 function toggleDisclaimer(on: boolean) {
   disclaimer.value = on ? DEFAULT_SEND_DISCLAIMER : null
@@ -87,6 +87,15 @@ const manualError = ref('')
 // request is dispatched, and treating it as settled flashes the empty state.
 const loading = (status: Ref<string>) => computed(() => status.value === 'idle' || status.value === 'pending')
 const toolsLoading = loading(toolStatus)
+
+/**
+ * Ordinary actions follow the All / Only selected switch. Opt-in actions
+ * (`optIn` on the server's `defineKindTool`, e.g. media downloads) are never
+ * covered by "All actions", so they get their own checkboxes, shown in both
+ * modes, and Check all / Uncheck all leave them alone.
+ */
+const regularTools = computed(() => (toolData.value?.tools ?? []).filter(tool => !tool.optIn))
+const optInTools = computed(() => (toolData.value?.tools ?? []).filter(tool => tool.optIn))
 const chatsLoading = loading(chatStatus)
 const tablesLoading = loading(tableStatus)
 
@@ -195,11 +204,22 @@ function bulkState(key: ScopeList, shown: string[], query: string): BulkState {
 }
 
 function applyBulk(key: ScopeList, state: BulkState, on: boolean) {
-  if (!on && !state.filtered) scope.value = { ...scope.value, [key]: [] }
+  if (!on && !state.filtered) scope.value = { ...scope.value, [key]: key === 'tool_names' ? heldOptIn() : [] }
   else toggle(key, state.shown, on)
 }
 
-const toolBulk = computed(() => bulkState('tool_names', (toolData.value?.tools ?? []).map(t => t.name), ''))
+/** The opt-in actions ticked: "Uncheck all" acts on ordinary actions only, so these survive it. */
+function heldOptIn(): string[] {
+  const optIn = new Set(optInTools.value.map(tool => tool.name))
+  return scope.value.tool_names.filter(name => optIn.has(name))
+}
+
+// Ordinary actions only, and the state ignores ticked opt-in actions:
+// "Check all" must never grant one, and one ticked must not enable "Uncheck all".
+const toolBulk = computed(() => {
+  const state = bulkState('tool_names', regularTools.value.map(t => t.name), '')
+  return { ...state, canUncheck: scope.value.tool_names.length > heldOptIn().length }
+})
 const tableBulk = computed(() => bulkState('table_names', visibleTables.value.map(t => t.qname), tableSearch.value))
 const chatBulk = computed(() => bulkState('chat_jids', visibleChats.value.flatMap(membersOf), search.value))
 
@@ -309,7 +329,7 @@ async function addByNumber() {
 
         <template v-else>
           <div
-            v-for="tool in toolData?.tools ?? []"
+            v-for="tool in regularTools"
             :key="tool.name"
             class="flex items-start gap-3"
           >
@@ -332,6 +352,45 @@ async function addByNumber() {
             </div>
           </div>
         </template>
+      </div>
+
+      <!--
+        Opt-in actions, outside the All / Only selected switch: "All actions"
+        never includes them, so an existing token does not gain one because the
+        server was upgraded. Ticked here, in either mode.
+      -->
+      <div v-if="optInTools.length > 0" class="space-y-2 rounded-md border border-dashed p-3">
+        <div>
+          <p class="text-sm font-medium">
+            Opt-in actions
+          </p>
+          <p class="text-xs text-muted-foreground">
+            Not included in "All actions": tick each one this token may use, in either mode. They act only in the chats the token can read.
+          </p>
+        </div>
+        <div
+          v-for="tool in optInTools"
+          :key="tool.name"
+          class="flex items-start gap-3"
+        >
+          <Checkbox
+            :id="`tool-${tool.name}`"
+            :model-value="scope.tool_names.includes(tool.name)"
+            class="mt-0.5"
+            @update:model-value="toggle('tool_names', tool.name, $event === true)"
+          />
+          <div class="min-w-0 flex-1">
+            <Label :for="`tool-${tool.name}`" class="flex items-center gap-2 font-normal">
+              {{ tool.title }}
+              <Badge :variant="tool.readOnly ? 'secondary' : 'outline'" class="text-[10px]">
+                {{ tool.readOnly ? 'read' : 'write' }}
+              </Badge>
+            </Label>
+            <p class="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
+              {{ tool.description }}
+            </p>
+          </div>
+        </div>
       </div>
 
       <!--

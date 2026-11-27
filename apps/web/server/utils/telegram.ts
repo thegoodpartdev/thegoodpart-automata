@@ -163,6 +163,16 @@ export type BridgeResolved = {
   known: boolean
 }
 
+/**
+ * End-to-end deadline on one media request to the bridge, body included
+ * (`applyRequestDeadline`). The bridge gives a download 120 s
+ * (`MEDIA_DOWNLOAD_DEADLINE_MS` in apps/telegram-bridge/src/sessions.ts); this
+ * allows that plus a margin, so a download the bridge would finish is never cut
+ * by the app first, and one the bridge gives up on ends here with the bridge's
+ * own answer. Change both together.
+ */
+const BRIDGE_MEDIA_DEADLINE_MS = 130_000
+
 export type BridgeSent = {
   chatId: string
   messageId: number
@@ -178,6 +188,16 @@ export type BridgeBackfill = {
 }
 
 const BRIDGE_REQUEST_DEADLINE_MS = 20_000
+
+/**
+ * Unlinking and deleting a session wipe everything synced for it, after a
+ * Telegram-side logout the bridge allows 20 s to connect and 20 s to answer.
+ * The wipe runs in batches (#303) and takes as long as the account's history
+ * does — tens of seconds for a few million messages — so the ordinary deadline
+ * would give up on a delete that was going to succeed. Cut short anyway, the
+ * bridge carries on and the batches it committed stay done: a retry finishes it.
+ */
+const BRIDGE_SESSION_WIPE_DEADLINE_MS = 180_000
 
 /**
  * A `$fetch` bound to one bridge and one bearer key. Same check-not-pin caveat
@@ -215,7 +235,7 @@ export function createTelegramBridge(creds: TelegramCredentials) {
     // logged here, and the bridge never stores it.
     password: (password: string) => client<BridgeSessionState>(`${session}/password`, { method: 'POST', body: { password } }),
     reconnect: () => client<BridgeSessionState>(`${session}/reconnect`, { method: 'POST' }),
-    logout: () => client<BridgeSessionState>(`${session}/logout`, { method: 'POST' }),
+    logout: () => client<BridgeSessionState>(`${session}/logout`, { method: 'POST', timeout: BRIDGE_SESSION_WIPE_DEADLINE_MS }),
     resolve: (query: string) => client<BridgeResolved>(`${session}/resolve`, { method: 'POST', body: { query } }),
     // More older history for one chat whose backfill stopped at its message
     // count. The bridge stores it and fetches at backfill's own pace.
@@ -228,6 +248,13 @@ export function createTelegramBridge(creds: TelegramCredentials) {
       method: 'POST',
       body: { chatId, caption, mimeType: image.mimeType, image: image.bytes.toString('base64') },
       timeout: 90_000,
+    }),
+    // The file as a byte stream, never read here: callers pipe it or read it
+    // capped (telegram-media.ts). Metadata comes in the bridge's x-media-* headers.
+    media: (chatId: string, messageId: number, maxBytes: number, signal?: AbortSignal) => openMediaStream(client, `${session}/media`, {
+      query: { chatId, messageId, maxBytes },
+      timeout: BRIDGE_MEDIA_DEADLINE_MS,
+      ...(signal && { signal }),
     }),
     webhook: (url: string, headers: Record<string, string>) => client(`${session}/webhook`, { method: 'PUT', body: { url, headers } }),
   }
@@ -248,7 +275,7 @@ export function createTelegramAdminBridge(creds: TelegramAdminCredentials) {
   const client = bridgeFetch(creds.baseUrl, creds.adminKey, creds.userSupplied)
   return {
     createSession: (name: string) => client<{ id: string, name: string, apiKey: string }>('/sessions', { method: 'POST', body: { name } }),
-    deleteSession: (id: string) => client(`/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+    deleteSession: (id: string) => client(`/sessions/${encodeURIComponent(id)}`, { method: 'DELETE', timeout: BRIDGE_SESSION_WIPE_DEADLINE_MS }),
   }
 }
 
