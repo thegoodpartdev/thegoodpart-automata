@@ -18,6 +18,9 @@ logs
 .fleet
 .idea
 
+# Docker Backups
+automata-data-*
+
 # Local env files
 .env
 .env.*
