@@ -41,7 +41,9 @@ services:
       retries: 10
 
   web:
-    image: ghcr.io/ju-li/automata-mcp-web:1
+    # Self-built fork image: set AUTOMATA_WEB_IMAGE in .env, e.g.
+    #   AUTOMATA_WEB_IMAGE=ghcr.io/thegoodpartdev/automata-mcp-web:sha-089df6d
+    image: ${AUTOMATA_WEB_IMAGE:-ghcr.io/ju-li/automata-mcp-web:1}
     restart: unless-stopped
     depends_on:
       postgres:
